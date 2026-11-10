@@ -38,7 +38,8 @@ class PointerSession(ctx: Context) {
     val motionAvailable: Boolean get() = motion.isAvailable
 
     init {
-        motion.onSample = { t, az, el -> main.post { link.sendAim(t, az, el) } }
+        // straight from the sensor thread: no hop through the main thread
+        motion.onSample = { t, az, el -> link.sendAim(t, az, el) }
         link.listeners.add {
             update()
             listeners.forEach { it() }

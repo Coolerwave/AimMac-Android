@@ -32,6 +32,7 @@ class MotionAim(ctx: Context) : SensorEventListener {
     private val gyro: Sensor? = sm.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
     private val gravitySensor: Sensor? = sm.getDefaultSensor(Sensor.TYPE_GRAVITY)
     private val accel: Sensor? = sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+    private val gameRot: Sensor? = sm.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR)
 
     private var thread: HandlerThread? = null
 
@@ -39,11 +40,12 @@ class MotionAim(ctx: Context) : SensorEventListener {
         private set
 
     val isAvailable: Boolean
-        get() = gyro != null && (gravitySensor != null || accel != null)
+        get() = gyro != null && (gameRot != null || gravitySensor != null || accel != null)
 
     /** (timestamp, azimuth, elevation) in seconds and degrees, ~100 Hz, on a background thread. */
     var onSample: ((Double, Double, Double) -> Unit)? = null
 
+    private val rot = FloatArray(9)
     private var gx = 0.0
     private var gy = 0.0
     private var gz = 0.0
@@ -60,7 +62,9 @@ class MotionAim(ctx: Context) : SensorEventListener {
         lastT = 0L
         haveGravity = false
         sm.registerListener(this, gyro, SAMPLE_US, h)
-        val g = gravitySensor ?: accel
+        // Best source of "up": the fused game rotation vector (gyro + accelerometer, no
+        // lag, like CoreMotion's gravity). Plain gravity and the raw accelerometer are fallbacks.
+        val g = gameRot ?: gravitySensor ?: accel
         sm.registerListener(this, g, SAMPLE_US, h)
         isRunning = true
     }
@@ -77,6 +81,14 @@ class MotionAim(ctx: Context) : SensorEventListener {
 
     override fun onSensorChanged(e: SensorEvent) {
         when (e.sensor.type) {
+            Sensor.TYPE_GAME_ROTATION_VECTOR -> {
+                // third row of the rotation matrix = world "up" in device coordinates
+                SensorManager.getRotationMatrixFromVector(rot, e.values)
+                gx = rot[6].toDouble()
+                gy = rot[7].toDouble()
+                gz = rot[8].toDouble()
+                haveGravity = true
+            }
             Sensor.TYPE_GRAVITY -> {
                 gx = e.values[0].toDouble()
                 gy = e.values[1].toDouble()
@@ -103,7 +115,7 @@ class MotionAim(ctx: Context) : SensorEventListener {
     private fun gyroSample(e: SensorEvent) {
         if (!haveGravity) return
         val gn = sqrt(gx * gx + gy * gy + gz * gz)
-        if (gn < 1.0) return
+        if (gn < 0.5) return
         // unit "up" vector in the device frame
         val ux = gx / gn
         val uy = gy / gn

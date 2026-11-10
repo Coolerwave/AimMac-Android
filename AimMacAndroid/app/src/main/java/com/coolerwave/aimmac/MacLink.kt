@@ -41,6 +41,7 @@ class MacLink(private val ctx: Context) {
 
     data class FoundMac(val address: String, var name: String, var rssi: Int)
 
+    @Volatile
     var state = State.Searching
         private set
     val found = mutableListOf<FoundMac>()
@@ -48,6 +49,7 @@ class MacLink(private val ctx: Context) {
         private set
     var macPaused = false
         private set
+    @Volatile
     var paused = false
         private set
 
@@ -61,7 +63,9 @@ class MacLink(private val ctx: Context) {
     private val adapter: BluetoothAdapter? =
         (ctx.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
 
+    @Volatile
     private var gatt: BluetoothGatt? = null
+    @Volatile
     private var input: BluetoothGattCharacteristic? = null
     private var statusChar: BluetoothGattCharacteristic? = null
     private var mtu = 23
@@ -69,6 +73,9 @@ class MacLink(private val ctx: Context) {
     private var started = false
     private var helloSent = false
 
+    // The write queue is touched from the sensor thread, the main thread and
+    // Bluetooth callbacks, so every access to it goes through this lock.
+    private val lock = Any()
     private val events = ArrayDeque<ByteArray>()
     private var latestAim: ByteArray? = null
     private var inFlight = false
@@ -148,7 +155,7 @@ class MacLink(private val ctx: Context) {
         w.f64(t)
         w.f32(az.toFloat())
         w.f32(el.toFloat())
-        latestAim = w.bytes()
+        synchronized(lock) { latestAim = w.bytes() }
         flush()
     }
 
@@ -274,10 +281,12 @@ class MacLink(private val ctx: Context) {
         gatt = null
         input = null
         statusChar = null
-        inFlight = false
         helloSent = false
-        events.clear()
-        latestAim = null
+        synchronized(lock) {
+            inFlight = false
+            events.clear()
+            latestAim = null
+        }
     }
 
     private fun handleDisconnect(g: BluetoothGatt) {
@@ -285,7 +294,7 @@ class MacLink(private val ctx: Context) {
         if (gatt === g) gatt = null
         input = null
         statusChar = null
-        inFlight = false
+        synchronized(lock) { inFlight = false }
         helloSent = false
         main.removeCallbacks(infoTick)
         main.removeCallbacks(helloFallback)
@@ -357,10 +366,9 @@ class MacLink(private val ctx: Context) {
         }
 
         override fun onCharacteristicWrite(g: BluetoothGatt, c: BluetoothGattCharacteristic, status: Int) {
-            main.post {
-                inFlight = false
-                flush()
-            }
+            // straight on the Bluetooth thread: the next packet goes out without waiting for the main thread
+            synchronized(lock) { inFlight = false }
+            flush()
         }
     }
 
@@ -372,8 +380,10 @@ class MacLink(private val ctx: Context) {
         }
         input = s.getCharacteristic(TM.input)
         statusChar = s.getCharacteristic(TM.status)
-        events.clear()
-        latestAim = null
+        synchronized(lock) {
+            events.clear()
+            latestAim = null
+        }
         helloSent = false
         setState(State.WaitingApproval)
 
@@ -422,7 +432,7 @@ class MacLink(private val ctx: Context) {
         w.uuid(deviceId)
         w.u8(Kind.DEVICE_PHONE)
         w.string(deviceName)
-        events.addFirst(w.bytes())
+        synchronized(lock) { events.addFirst(w.bytes()) }
         sendInfo()
         flush()
         main.removeCallbacks(infoTick)
@@ -457,8 +467,10 @@ class MacLink(private val ctx: Context) {
     private fun sendEvent(d: ByteArray) {
         val k = d[0].toInt()
         if (state != State.Ready && k != Kind.HELLO && k != Kind.INFO) return
-        events.addLast(d)
-        while (events.size > 64) events.removeFirst()
+        synchronized(lock) {
+            events.addLast(d)
+            while (events.size > 64) events.removeFirst()
+        }
         flush()
     }
 
@@ -467,27 +479,33 @@ class MacLink(private val ctx: Context) {
     /**
      * Clicks and scrolls go first and are never dropped; for aim only the
      * newest sample matters, so an old one is simply replaced. One write is in
-     * flight at a time.
+     * flight at a time. Safe to call from any thread.
      */
     private fun flush() {
-        val g = gatt ?: return
-        val c = input ?: return
-        if (inFlight) {
-            if (SystemClock.uptimeMillis() - inFlightSince > 40) inFlight = false else return
-        }
-        val fromAim = events.isEmpty()
-        val next = events.removeFirstOrNull() ?: latestAim?.also { latestAim = null } ?: return
-        if (write(g, c, next)) {
-            inFlight = true
-            inFlightSince = SystemClock.uptimeMillis()
-        } else {
-            if (fromAim) {
-                if (latestAim == null) latestAim = next
-            } else {
-                events.addFirst(next)
+        var busy = false
+        synchronized(lock) {
+            val g = gatt ?: return
+            val c = input ?: return
+            if (inFlight) {
+                if (SystemClock.uptimeMillis() - inFlightSince > 25) inFlight = false else return
             }
+            val fromAim = events.isEmpty()
+            val next = events.removeFirstOrNull() ?: latestAim?.also { latestAim = null } ?: return
+            if (write(g, c, next)) {
+                inFlight = true
+                inFlightSince = SystemClock.uptimeMillis()
+            } else {
+                if (fromAim) {
+                    if (latestAim == null) latestAim = next
+                } else {
+                    events.addFirst(next)
+                }
+                busy = true
+            }
+        }
+        if (busy) {
             main.removeCallbacks(retry)
-            main.postDelayed(retry, 8)
+            main.postDelayed(retry, 3)
         }
     }
 
