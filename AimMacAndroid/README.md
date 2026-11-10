@@ -25,6 +25,14 @@ No Wi-Fi and no servers: the phone talks straight to the Mac over Bluetooth.
 3. Open AimMac on the phone and allow **Nearby devices** (Bluetooth). Tap **Pair** next to your Mac, then click **Allow** on the Mac.
 4. Hold the phone like a remote, top edge toward the screen, aim at the middle of the screen and tap **Center**.
 
+## Play Ping Pong
+
+Want something fun to try it on? The repo includes a browser table tennis game where the phone is your paddle: [`PingPong/`](../PingPong) here, or play online at https://coolerwave.github.io/AimMac/PingPong/
+
+Connect the phone to the Mac, open the game, aim at an opponent and tap. The game goes full screen, then swing to hit.
+
+![Ping Pong](../PingPong/screenshots/rally.jpg)
+
 ## How it works
 
 The phone sends the same small packets as the iPhone app (`Protocol.kt` mirrors `Shared/Protocol.swift`): a hello, aim samples at about 100 Hz (azimuth and elevation in degrees), press, release, right click, scroll and move. The gyroscope gives the turn around the true vertical (left/right), gravity gives the tilt (up/down), same maths as `MotionAim` on iOS. The Mac does the rest: smoothing, freezing the cursor on a press, and clicking where you were aiming.
